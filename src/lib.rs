@@ -24,20 +24,24 @@ static ref DTMF_MAP: HashMap<u32, char> = HashMap::from(
     ]
 );
 }
-const MIN_THRESHOLD: f32 = 10.0;
+const MIN_THRESHOLD: f32 = 5.0;
 
-pub fn goertzel(target_freq: f32, sample_rate: f32, samples: &[f32]) -> f32 {
-    let k: f32 = (0.5 + samples.len() as f32 * target_freq / sample_rate).floor();
-    let omega = (2.0 * PI * k) / samples.len() as f32;
-    // let omega = (2.0 * PI * target_freq) / sample_rate;
+pub fn goertzel(target_freq: f32, sample_rate: u32, samples: &[f32]) -> f32 {
+    // let k: f32 = (0.5 + samples.len() as f32 * target_freq / sample_rate as f32).floor();
+    // let omega = (2.0 * PI * k) / samples.len() as f32;
+    let omega = (2.0 * PI * target_freq) / sample_rate as f32;
     let coefficient = 2.0 * f32::cos(omega);
     
-    let mut q = (0_f32, 0_f32, 0_f32);
-    for sample in samples.iter() {
-        q.0 = coefficient * q.1 - q.2 + *sample as f32;
+    let mut q = (0.0, 0.0, 0.0);
+    for (n, sample) in samples.iter().enumerate() {
+        //let adjusted_sample = *sample * (0.5 - 0.25 * f32::cos(2.0 * PI * (n / samples.len()) as f32));
+        let adjusted_sample = *sample;
+        q.0 = coefficient * q.1 - q.2 + adjusted_sample;
         q.2 = q.1;
         q.1 = q.0;
     }
+
+    // (q.1 * q.1 + q.2 * q.2 - coefficient * q.1 * q.2) / ( samples.len() * samples.len() ) as f32
 
     ((q.1 - q.2 * f32::cos(omega)).powf(2.0)
         + 
@@ -57,7 +61,7 @@ pub fn standard_deviation(data: &[f32]) -> Option<f32> {
     }
 }
 
-pub fn get_dtmf_components(samples: &[f32], sample_rate: f32) -> Option<Vec<u32>> {
+pub fn get_dtmf_components(samples: &[f32], sample_rate: u32) -> Option<Vec<u32>> {
     let results: Vec<f32> = 
         DTMF_FREQUENCIES.iter()
         .map(|freq| goertzel(*freq as f32, sample_rate, samples))
@@ -68,7 +72,7 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: f32) -> Option<Vec<u32>
     let frequency_components: Vec<u32> = 
     results.into_iter()
         .zip(DTMF_FREQUENCIES)
-        .filter(|(output, _)| *output > mean + std_dev && *output > MIN_THRESHOLD)
+        .filter(|(output, _)| *output >= mean + std_dev && *output >= MIN_THRESHOLD)
         .map(|(_, freq)| freq)
         .collect();
 
@@ -78,7 +82,7 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: f32) -> Option<Vec<u32>
     }
 }
 
-pub fn decode_dtmf(samples: &[f32], sample_rate: f32) -> Option<&char> {
+pub fn decode_dtmf(samples: &[f32], sample_rate: u32) -> Option<&char> {
     match get_dtmf_components(samples, sample_rate) {
         Some(freqs) if freqs.len() >= 2 => DTMF_MAP.get(&(freqs[0] * freqs[1])), 
         _ => None,
@@ -122,14 +126,15 @@ mod tests {
     fn dtmf_process(filename: &str, expected_frequencies: &[u32]) {
         let file = BufReader::new(File::open(filename).unwrap());
         let source = Decoder::new(file).unwrap();
-        let sample_rate = source.sample_rate() as f32;
+        let sample_rate = source.sample_rate();
 
         let samples: Vec<f32> = source.convert_samples().collect();
+        let minimum_n = sample_rate / 70;
 
         let mut results: Vec<(u32, f32)> = Vec::new();
         println!("File: {}", filename);
         for freq in DTMF_FREQUENCIES {
-            let output = goertzel(freq as f32, sample_rate, &samples[0..2048]);
+            let output = goertzel(freq as f32, sample_rate, &samples[0..minimum_n as usize]);
             println!("{} Hz - {:.0}", freq, output);
 
             results.push((freq, output));
@@ -139,7 +144,7 @@ mod tests {
         let std_dev: f32 = standard_deviation(&outputs).unwrap();
 
         let frequency_components: Vec<u32> = results.iter()
-            .filter(|(_, output)| *output > mean + std_dev && *output > MIN_THRESHOLD )
+            .filter(|(_, output)| *output >= mean + std_dev && *output >= MIN_THRESHOLD )
             .map(|(freq, _)| *freq)
             .collect();
         println!("{:?} - {} - {}", frequency_components, mean, std_dev);
