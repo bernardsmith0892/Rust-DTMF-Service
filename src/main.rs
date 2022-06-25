@@ -1,58 +1,71 @@
-use std::{collections::VecDeque, sync::Mutex};
+use std::{io::{self, Write}, sync::Mutex};
 
-use cpal::{traits::{HostTrait, StreamTrait}, StreamConfig, SampleRate, BufferSize};
+use cpal::{traits::{HostTrait, StreamTrait}, StreamInstant};
+use dtmf::DtmfProcessor;
 use rodio::DeviceTrait;
 
-mod lib;
+pub mod lib;
 
-struct DtmfProcessor {
-    sample_rate: u32,
-    input_buffer: Mutex<Vec<f32>>,
-    minimum_n: u32,
-}
 
-impl DtmfProcessor {
-    pub fn process_input_stream(&mut self, data: &[f32], info: &cpal::InputCallbackInfo) {
-        let mut input_buffer = self.input_buffer.lock().unwrap();
-        input_buffer.extend(data);
 
-        if input_buffer.len() >= self.minimum_n as usize {
-            let mut frequencies: Vec<f32> = Vec::new();
-            for freq in lib::DTMF_FREQUENCIES {
-                let magnitude = lib::goertzel(freq as f32, self.sample_rate, data);
-                frequencies.push(magnitude);
+fn process_input_stream(data: &[f32], info: &cpal::InputCallbackInfo, processor: &mut DtmfProcessor, silence: &mut Mutex<(Option<StreamInstant>, bool)>) {
+    match processor.process_samples(data, info) {
+        Some(char) => {
+            print!("{}", char);
+            io::stdout().flush().unwrap();
+
+            *silence.lock().unwrap() = (Some(info.timestamp().capture), false);
+        },
+        None => {
+            let mut silence_value = silence.lock().unwrap();
+            match *silence_value {
+                (Some(silence_start), pushed) 
+                    if !pushed && 
+                    info.timestamp().capture
+                        .duration_since(&silence_start)
+                        .unwrap().as_millis() >= dtmf::SPACE_LENGTH
+                    => {
+                        print!(" ");
+                        io::stdout().flush().unwrap();
+                        silence_value.1 = true;
+                },
+                (None, _) => {
+                    *silence_value = (Some(info.timestamp().capture), false);
+                },
+                _ => {},
             }
-            let mean = frequencies.iter().sum::<f32>() / frequencies.len() as f32;
-            let std_dev = lib::standard_deviation(&frequencies).unwrap();
-            println!("{:.0?} - {:.4} - {:.4} ({})", frequencies, mean, std_dev, input_buffer.len());
-            //println!("{:?}", lib::get_dtmf_components(&data, self.sample_rate));
-            //println!("{:?}", lib::decode_dtmf(&data, self.sample_rate));
-
-            input_buffer.clear();
-        }
+        },
     }
 }
 
 fn main() {
     let host = cpal::default_host();
-    let device = host.default_input_device().expect("no input device available!");
+    let devices = host.input_devices().expect("no input devices available!");
+    println!("Select input device:");
+    for (i, device) in devices.enumerate() {
+        println!("\t{} - {:?}", i, device.name().unwrap());
+    }
+
+    let mut input_string = String::new();
+    std::io::stdin().read_line(&mut input_string).unwrap();
+    let device_index = input_string.trim().parse::<i32>().expect("must provide a number!");
+
+
+    let device = host.input_devices().unwrap().nth(device_index as usize).expect("cannot use this device!");
     let config = device.default_input_config().unwrap().config();
 
-    let mut processor = DtmfProcessor {
-        sample_rate: config.sample_rate.0,
-        input_buffer: Mutex::new(Vec::new()),
-        minimum_n: config.sample_rate.0 / 70,
-    };
+    let mut processor = dtmf::DtmfProcessor::new(config.sample_rate.0, config.channels); 
 
     println!("{}, {:?}", device.name().unwrap(), config);
     for supported in device.supported_input_configs().unwrap() {
         println!("{:?}", supported);
     }
 
+    let mut silence_start: Mutex<(Option<StreamInstant>, bool)> = Mutex::new((None, true));
     let stream = device.build_input_stream(
         &config, 
-        move |data, info| processor.process_input_stream(data, info),
-        |err| {}
+        move |data, info| process_input_stream(data, info, &mut processor, &mut silence_start),
+        |_| {}
     ).expect("cannot build stream!");
 
     stream.play().unwrap();

@@ -1,7 +1,9 @@
-use std::{f32::consts::PI, collections::HashMap};
+use std::{f32::consts::PI, collections::HashMap, sync::Mutex};
+use cpal::{StreamInstant};
 use lazy_static::lazy_static;
 
-pub const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
+const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
+const MIN_THRESHOLD: f32 = 2.0;
 lazy_static! {
 static ref DTMF_MAP: HashMap<u32, char> = HashMap::from(
     [
@@ -24,29 +26,101 @@ static ref DTMF_MAP: HashMap<u32, char> = HashMap::from(
     ]
 );
 }
-const MIN_THRESHOLD: f32 = 5.0;
+
+pub struct DtmfProcessor {
+    pub sample_rate: u32,
+    pub channels: u16,
+    input_buffer: Mutex<Vec<f32>>,
+    minimum_n: u32,
+    candidate: Option<(char, StreamInstant, bool)>,
+}
+
+pub const TONE_LENGTH: u128 = 40; // ms
+pub const SPACE_LENGTH: u128 = 500; // ms
+
+impl DtmfProcessor {
+    pub fn new(sample_rate: u32, channels: u16) -> Self {
+        Self { 
+            sample_rate: sample_rate,
+            channels: channels, 
+            input_buffer: Mutex::new(Vec::new()), 
+            minimum_n: sample_rate / 70, // Buffer must have enough samples to allow under 70Hz wide bins
+            // output_buffer: Mutex::new(String::new()), 
+            candidate: None,
+        }
+    }
+
+    pub fn process_samples(&mut self, data: &[f32], info: &cpal::InputCallbackInfo) -> Option<char> {
+        // Unlock the input_buffer and add the current data
+        let mut input_buffer = self.input_buffer.lock().unwrap();
+        input_buffer.extend::<Vec<f32>>(
+            // Convert multi-channel inputs into mono by averaging
+            data.chunks(self.channels as usize)
+            .map(|c| c.iter().sum::<f32>() / c.len() as f32 )
+            .collect()
+        );
+
+        // Process the current input if we have enough samples
+        if input_buffer.len() >= self.minimum_n as usize {
+            // Analyze the input to detect a DTMF signal
+            let current_tone = detect_dtmf(&input_buffer, self.sample_rate);
+            let current_time = info.timestamp().capture;
+
+            match current_tone {
+                // If we detected a DTMF signal
+                Some(&tone) => match self.candidate {
+                    // Add this digit if:
+                    //  - It matches the candidate
+                    //  - It's been on longer than the minimum tone spacing
+                    //  - And it's not already pushed to the output buffer
+                    Some((candidate_tone, start_time, pushed)) if tone == candidate_tone => {
+                        if current_time.duration_since(&start_time)
+                            .unwrap()
+                            .as_millis() >= TONE_LENGTH 
+                        && !pushed {
+                            // Mark this character as pushed
+                            self.candidate = Some((tone, start_time, true));
+
+                            // Print the current char and clear the input buffer
+                            input_buffer.clear();
+                            return Some(tone);
+                        }
+                    },
+                    // Change the candidate if it's different from the current tone
+                    _ => self.candidate = Some((tone, current_time, false)),
+                },
+                // Clear the candidate value if we do not detect any DTMF tones
+                None => self.candidate = None,
+            }
+
+            // Clear the input buffer
+            input_buffer.clear();
+        }
+
+        // No new DTMF character detected
+        None
+    }
+}
 
 pub fn goertzel(target_freq: f32, sample_rate: u32, samples: &[f32]) -> f32 {
-    // let k: f32 = (0.5 + samples.len() as f32 * target_freq / sample_rate as f32).floor();
-    // let omega = (2.0 * PI * k) / samples.len() as f32;
     let omega = (2.0 * PI * target_freq) / sample_rate as f32;
     let coefficient = 2.0 * f32::cos(omega);
     
+    // First Stage - Compute the IIR
     let mut q = (0.0, 0.0, 0.0);
-    for (n, sample) in samples.iter().enumerate() {
-        //let adjusted_sample = *sample * (0.5 - 0.25 * f32::cos(2.0 * PI * (n / samples.len()) as f32));
-        let adjusted_sample = *sample;
-        q.0 = coefficient * q.1 - q.2 + adjusted_sample;
+    for &sample in samples {
+        // Hamming Window
+        // let adjusted_sample = sample * (0.5 - 0.25 * f32::cos(2.0 * PI * (n / samples.len()) as f32));
+        q.0 = sample + coefficient * q.1 - q.2;
         q.2 = q.1;
         q.1 = q.0;
     }
 
-    // (q.1 * q.1 + q.2 * q.2 - coefficient * q.1 * q.2) / ( samples.len() * samples.len() ) as f32
+    // Second Stage - Compute the FIR
+    let real = q.1 - q.2 * f32::cos(omega);
+    let imaginary = q.2 * f32::sin(omega);
 
-    ((q.1 - q.2 * f32::cos(omega)).powf(2.0)
-        + 
-    (q.2 * f32::sin(omega)).powf(2.0)
-    ).sqrt()
+    ( real.powf(2.0) + imaginary.powf(2.0) ).sqrt()
 }
 
 pub fn standard_deviation(data: &[f32]) -> Option<f32> {
@@ -82,7 +156,7 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32) -> Option<Vec<u32>
     }
 }
 
-pub fn decode_dtmf(samples: &[f32], sample_rate: u32) -> Option<&char> {
+pub fn detect_dtmf(samples: &[f32], sample_rate: u32) -> Option<&char> {
     match get_dtmf_components(samples, sample_rate) {
         Some(freqs) if freqs.len() >= 2 => DTMF_MAP.get(&(freqs[0] * freqs[1])), 
         _ => None,
@@ -119,11 +193,11 @@ mod tests {
         ];
 
         for case in test_cases {
-            dtmf_process(case.0, &case.1);
+            dtmf_single_tone_process(case.0, &case.1);
         }
     }
 
-    fn dtmf_process(filename: &str, expected_frequencies: &[u32]) {
+    fn dtmf_single_tone_process(filename: &str, expected_frequencies: &[u32]) {
         let file = BufReader::new(File::open(filename).unwrap());
         let source = Decoder::new(file).unwrap();
         let sample_rate = source.sample_rate();
