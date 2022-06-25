@@ -32,10 +32,10 @@ pub struct DtmfProcessor {
     pub channels: u16,
     input_buffer: Mutex<Vec<f32>>,
     minimum_n: u32,
-    candidate: Option<(char, StreamInstant, bool)>,
+    candidate: (char, Option<StreamInstant>, bool),
 }
 
-pub const TONE_LENGTH: u128 = 40; // ms
+pub const TONE_LENGTH: u128 = 20; // ms
 pub const SPACE_LENGTH: u128 = 500; // ms
 
 impl DtmfProcessor {
@@ -45,8 +45,7 @@ impl DtmfProcessor {
             channels: channels, 
             input_buffer: Mutex::new(Vec::new()), 
             minimum_n: sample_rate / 70, // Buffer must have enough samples to allow under 70Hz wide bins
-            // output_buffer: Mutex::new(String::new()), 
-            candidate: None,
+            candidate: (' ', None, true),
         }
     }
 
@@ -73,13 +72,13 @@ impl DtmfProcessor {
                     //  - It matches the candidate
                     //  - It's been on longer than the minimum tone spacing
                     //  - And it's not already pushed to the output buffer
-                    Some((candidate_tone, start_time, pushed)) if tone == candidate_tone => {
+                    (candidate_tone, Some(start_time), pushed) if tone == candidate_tone => {
                         if current_time.duration_since(&start_time)
                             .unwrap()
                             .as_millis() >= TONE_LENGTH 
                         && !pushed {
                             // Mark this character as pushed
-                            self.candidate = Some((tone, start_time, true));
+                            self.candidate = (tone, Some(start_time), true);
 
                             // Print the current char and clear the input buffer
                             input_buffer.clear();
@@ -87,10 +86,31 @@ impl DtmfProcessor {
                         }
                     },
                     // Change the candidate if it's different from the current tone
-                    _ => self.candidate = Some((tone, current_time, false)),
+                    _ => self.candidate = (tone, Some(current_time), false),
                 },
-                // Clear the candidate value if we do not detect any DTMF tones
-                None => self.candidate = None,
+                // If we do not detect any DTMF tones...
+                None => {
+                    match self.candidate {
+                        // Mark a space if there has been enough silence
+                        (' ', Some(silence_start), pushed) => {
+                            if current_time.duration_since(&silence_start)
+                                .unwrap().as_millis() >= SPACE_LENGTH 
+                            && !pushed {
+                                // Mark this space as pushed
+                                self.candidate = (' ', Some(silence_start), true);     
+
+                                // Print the space and clear the input buffer
+                                input_buffer.clear();
+                                return Some(' ');
+                            }
+                        },
+                        // The base case - Add a timestamp and do not push a leading space char
+                        (' ', None, pushed) if pushed => self.candidate = (' ', Some(current_time), true),
+
+                        // Start marking silence if don't detect a character
+                        _ => self.candidate = (' ', Some(current_time), false),
+                    }
+                },
             }
 
             // Clear the input buffer

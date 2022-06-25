@@ -1,6 +1,6 @@
-use std::{io::{self, Write}, sync::Mutex};
+use std::{io::{self, Write}};
 
-use cpal::{traits::{HostTrait, StreamTrait}, StreamInstant};
+use cpal::{traits::{HostTrait, StreamTrait}};
 use dtmf::DtmfProcessor;
 use rodio::DeviceTrait;
 
@@ -8,33 +8,13 @@ pub mod lib;
 
 
 
-fn process_input_stream(data: &[f32], info: &cpal::InputCallbackInfo, processor: &mut DtmfProcessor, silence: &mut Mutex<(Option<StreamInstant>, bool)>) {
+fn process_input_stream(data: &[f32], info: &cpal::InputCallbackInfo, processor: &mut DtmfProcessor) {
     match processor.process_samples(data, info) {
         Some(char) => {
             print!("{}", char);
             io::stdout().flush().unwrap();
-
-            *silence.lock().unwrap() = (Some(info.timestamp().capture), false);
         },
-        None => {
-            let mut silence_value = silence.lock().unwrap();
-            match *silence_value {
-                (Some(silence_start), pushed) 
-                    if !pushed && 
-                    info.timestamp().capture
-                        .duration_since(&silence_start)
-                        .unwrap().as_millis() >= dtmf::SPACE_LENGTH
-                    => {
-                        print!(" ");
-                        io::stdout().flush().unwrap();
-                        silence_value.1 = true;
-                },
-                (None, _) => {
-                    *silence_value = (Some(info.timestamp().capture), false);
-                },
-                _ => {},
-            }
-        },
+        None => {},
     }
 }
 
@@ -56,15 +36,9 @@ fn main() {
 
     let mut processor = dtmf::DtmfProcessor::new(config.sample_rate.0, config.channels); 
 
-    println!("{}, {:?}", device.name().unwrap(), config);
-    for supported in device.supported_input_configs().unwrap() {
-        println!("{:?}", supported);
-    }
-
-    let mut silence_start: Mutex<(Option<StreamInstant>, bool)> = Mutex::new((None, true));
     let stream = device.build_input_stream(
         &config, 
-        move |data, info| process_input_stream(data, info, &mut processor, &mut silence_start),
+        move |data, info| process_input_stream(data, info, &mut processor),
         |_| {}
     ).expect("cannot build stream!");
 
