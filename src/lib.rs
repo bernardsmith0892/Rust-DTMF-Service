@@ -1,100 +1,96 @@
-use std::{f32::consts::PI, sync::Mutex};
-use cpal::{StreamInstant};
+use std::{f32::consts::PI};
 
 const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
 const MIN_THRESHOLD: f32 = 2.0;
 
+/// Object to track timings of a stream to process a multi-digit DTMF signal
+#[derive(Debug)]
 pub struct DtmfProcessor {
+    /// Sample rate of input signal in *samples per second*.
     pub sample_rate: u32,
+    /// Number of input channels, assumed to be interleaved.
     pub channels: u16,
-    input_buffer: Mutex<Vec<f32>>,
-    minimum_n: u32,
-    candidate: (char, Option<StreamInstant>, bool),
+    /// The digit we are currently tracking. None if no digit detected.
+    candidate: Option<char>,
+    /// If we've already returned the candidate digit.
+    candidate_pushed: bool,
+    /// How long we've been tracking this candidate in *nanoseconds*.
+    current_timestamp: u128,
 }
 
-pub const TONE_LENGTH: u128 = 20; // ms
-pub const SPACE_LENGTH: u128 = 500; // ms
-
 impl DtmfProcessor {
+    /// Threshold length of a valid DTMF tone in *nanoseconds*.
+    const TONE_LENGTH: u128 = 20 * 1_000_000; 
+    /// Threshold length of silence in *nanoseconds* to mark a space.
+    const SPACE_LENGTH: u128 = 500 * 1_000_000; 
+
     pub fn new(sample_rate: u32, channels: u16) -> Self {
         Self { 
             sample_rate: sample_rate,
             channels: channels, 
-            input_buffer: Mutex::new(Vec::new()), 
-            minimum_n: sample_rate / 70, // Buffer must have enough samples to allow under 70Hz wide bins
-            candidate: (' ', None, true),
+            candidate: None,
+            candidate_pushed: true,
+            current_timestamp: 0,
         }
     }
 
-    pub fn process_samples(&mut self, data: &[f32], info: &cpal::InputCallbackInfo) -> Option<char> {
-        // Unlock the input_buffer and add the current data
-        let mut input_buffer = self.input_buffer.lock().unwrap();
-        input_buffer.extend::<Vec<f32>>(
-            // Convert multi-channel inputs into mono through averaging
-            data.chunks(self.channels as usize)
+    pub fn process_samples(&mut self, data: &[f32]) -> Option<char> {
+        // Convert multi-channel inputs into mono through averaging
+        let input_buffer: Vec<f32> = data.chunks(self.channels as usize)
             .map(|c| c.iter().sum::<f32>() / c.len() as f32 )
-            .collect()
-        );
+            .collect();
 
-        // Initialize the starting timestamp, if needed
-        if let (_, None, _) = self.candidate {
-            self.candidate = (' ', Some(info.timestamp().capture), true);
-        }
+        // Increment the current timestamp by the data length
+        let nanoseconds_per_sample: u128 = 1_000_000_000 / self.sample_rate as u128;
+        self.current_timestamp += input_buffer.len() as u128 * nanoseconds_per_sample;
 
+        // Analyze the input to detect a DTMF signal
+        match detect_dtmf_digit(&input_buffer, self.sample_rate) {
+            // If we detected a DTMF digit...
+            Some(digit) => {
+                // Return this digit if:
+                //  - It matches the known candidate
+                //  - It's been on longer than the minimum tone spacing
+                //  - And it's not already pushed to the output buffer
+                if Some(digit) == self.candidate {
+                    if self.current_timestamp >= DtmfProcessor::TONE_LENGTH
+                    && !self.candidate_pushed
+                    {
+                        // Mark this character as pushed
+                        self.candidate_pushed = true;
 
-        // Process the current input if we have enough samples
-        if input_buffer.len() >= self.minimum_n as usize {
-            // Analyze the input to detect a DTMF signal
-            let current_tone = detect_dtmf_digit(&input_buffer, self.sample_rate);
-            let current_time = info.timestamp().capture;
-
-            match current_tone {
-                // If we detected a DTMF signal...
-                Some(tone) => match self.candidate {
-                    // Return this digit if:
-                    //  - It matches the known candidate
-                    //  - It's been on longer than the minimum tone spacing
-                    //  - And it's not already pushed to the output buffer
-                    (candidate_tone, Some(start_time), pushed) if tone == candidate_tone => {
-                        if current_time.duration_since(&start_time)
-                            .unwrap()
-                            .as_millis() >= TONE_LENGTH 
-                        && !pushed {
-                            // Mark this character as pushed
-                            self.candidate = (tone, Some(start_time), true);
-
-                            // Print the current char and clear the input buffer
-                            input_buffer.clear();
-                            return Some(tone);
-                        }
-                    },
-                    // If it's a new digit, set it as the new candidate 
-                    _ => self.candidate = (tone, Some(current_time), false),
-                },
-                // If we do not detect a DTMF signal...
-                None => {
-                    match self.candidate {
-                        // Mark a space if there has been enough silence after a previous digit
-                        (' ', Some(silence_start), pushed) => {
-                            if current_time.duration_since(&silence_start)
-                                .unwrap().as_millis() >= SPACE_LENGTH 
-                            && !pushed {
-                                // Mark this space as pushed
-                                self.candidate = (' ', Some(silence_start), true);     
-
-                                // Print a space and clear the input buffer
-                                input_buffer.clear();
-                                return Some(' ');
-                            }
-                        },
-                        // Start marking silence if he haven't already
-                        _ => self.candidate = (' ', Some(current_time), false),
+                        // Print the current char
+                        return Some(digit);
                     }
-                },
-            }
+                }
+                // If it's a new digit, reset the candidate values
+                else {
+                    self.candidate = Some(digit);
+                    self.current_timestamp = 0;
+                    self.candidate_pushed = false;
+                }
+            },
+            // If we do not detect a DTMF signal...
+            None => {
+                // And we're currently tracking silence
+                if self.candidate.is_none() {
+                    // Mark a space if there has been enough silence after a previous digit
+                    if self.current_timestamp >= DtmfProcessor::SPACE_LENGTH 
+                    && !self.candidate_pushed {
+                        // Mark this space as pushed
+                        self.candidate_pushed = true;     
 
-            // Clear the input buffer
-            input_buffer.clear();
+                        // Print a space
+                        return Some(' ');
+                    }
+                }
+                // Start tracking silence if he haven't already
+                else {
+                    self.candidate = None;
+                    self.candidate_pushed = false;
+                    self.current_timestamp = 0;
+                }
+            },
         }
 
         // No new DTMF character detected
@@ -114,13 +110,13 @@ impl DtmfProcessor {
 /// 
 /// ```
 /// # use dtmf;
-/// # fn sin(n: u32, freq: f32, samp_rate: f32) -> f32 {
-/// #   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate)
-/// # }
+/// // Creates a digitized sine wave of a given frequency and sample rate
+/// let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
+///   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
 /// 
 /// // Create 0.5 second, 1000 Hz sine wave at 1,024 samples/sec
 /// let test_signal: Vec<f32> = (0..512)
-///     .map(|n| sin(n, 1000.0, 1024.0))
+///     .map(|n| sine_hz(n, 1000.0, 1024.0))
 ///     .collect();
 /// 
 /// // Test signal strength at two frequencies (1,000 Hz and 900 Hz)
@@ -137,10 +133,10 @@ pub fn goertzel(target_freq: f32, sample_rate: u32, samples: &[f32]) -> f32 {
     
     // First Stage - Compute the IIR
     let mut q = (0.0, 0.0, 0.0);
-    for &sample in samples {
+    for (n, &sample) in samples.iter().enumerate() {
         // Hamming Window
-        // let adjusted_sample = sample * (0.5 - 0.25 * f32::cos(2.0 * PI * (n / samples.len()) as f32));
-        q.0 = sample + coefficient * q.1 - q.2;
+        let adjusted_sample = sample * (0.5 - 0.25 * f32::cos(2.0 * PI * (n as f32 / samples.len() as f32)));
+        q.0 = adjusted_sample + coefficient * q.1 - q.2;
         q.2 = q.1;
         q.1 = q.0;
     }
@@ -164,7 +160,9 @@ fn standard_deviation(data: &[f32]) -> Option<f32> {
     }
 }
 
-/// Returns a vector of matching DTMF frequencies for this signal. A frequency is considered matching if its power is higher than the minimum threshold value (2.0) and it is at least one standard deviation stronger than the average power of all eight DTMF frequencies.
+/// Returns a vector of matching DTMF frequencies for this signal.
+/// 
+/// A frequency is considered matching if its power is higher than the minimum threshold value (2.0) and it is at least one standard deviation stronger than the average power of all eight DTMF frequencies.
 /// 
 /// # Arguments
 /// 
@@ -175,13 +173,13 @@ fn standard_deviation(data: &[f32]) -> Option<f32> {
 /// 
 /// ```
 /// # use dtmf;
-/// # fn sin(n: u32, freq: f32, samp_rate: f32) -> f32 {
-/// #   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate)
-/// # }
+/// // Creates a digitized sine wave of a given frequency and sample rate
+/// let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
+///   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
 /// 
 /// // Create 0.5 second signal with 697 Hz and 1633 Hz components (DMTF `A`)
 /// let test_signal: Vec<f32> = (0..512)
-///     .map(|n| sin(n, 697.0, 1024.0) + sin(n, 1633.0, 1024.0))
+///     .map(|n| sine_hz(n, 697.0, 1024.0) + sine_hz(n, 1633.0, 1024.0))
 ///     .collect();
 /// 
 /// let components = dtmf::get_dtmf_components(&test_signal, 1024);
@@ -219,18 +217,18 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32) -> Vec<u32> {
 /// 
 /// ```
 /// # use dtmf;
-/// # fn sin(n: u32, freq: f32, samp_rate: f32) -> f32 {
-/// #   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate)
-/// # }
+/// // Creates a digitized sine wave of a given frequency and sample rate
+/// let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
+///   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
 /// 
 /// // Create 0.5 second signal with 697 Hz and 1633 Hz components (DMTF `A`)
 /// let a_signal: Vec<f32> = (0..512)
-///     .map(|n| sin(n, 697.0, 1024.0) + sin(n, 1633.0, 1024.0))
+///     .map(|n| sine_hz(n, 697.0, 1024.0) + sine_hz(n, 1633.0, 1024.0))
 ///     .collect();
 ///
 /// // Create 0.5 second signal with 1000 Hz and 600 Hz components (invalid DTMF)
 /// let bad_signal: Vec<f32> = (0..512)
-///     .map(|n| sin(n, 1000.0, 1024.0) + sin(n, 600.0, 1024.0))
+///     .map(|n| sine_hz(n, 1000.0, 1024.0) + sine_hz(n, 600.0, 1024.0))
 ///     .collect();
 /// 
 /// let digit = dtmf::detect_dtmf_digit(&a_signal, 1024);
@@ -279,60 +277,64 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn dtmf_test() {
+    pub fn dtmf_single_digit_test() {
         let test_cases = [
-            ("test_audio/Dtmf0.ogg", [941, 1336]),
-            ("test_audio/Dtmf1.ogg", [697, 1209]),
-            ("test_audio/Dtmf2.ogg", [697, 1336]),
-            ("test_audio/Dtmf3.ogg", [697, 1477]),
-            ("test_audio/Dtmf4.ogg", [770, 1209]),
-            ("test_audio/Dtmf5.ogg", [770, 1336]),
-            ("test_audio/Dtmf6.ogg", [770, 1477]),
-            ("test_audio/Dtmf7.ogg", [852, 1209]),
-            ("test_audio/Dtmf8.ogg", [852, 1336]),
-            ("test_audio/Dtmf9.ogg", [852, 1477]),
-            ("test_audio/DtmfA.ogg", [697, 1633]),
-            ("test_audio/DtmfB.ogg", [770, 1633]),
-            ("test_audio/DtmfC.ogg", [852, 1633]),
-            ("test_audio/DtmfD.ogg", [941, 1633]),
-            ("test_audio/DtmfPound.ogg", [941, 1477]),
-            ("test_audio/DtmfStar.ogg", [941, 1209]),
+            ("test_audio/Dtmf0.ogg", '0'),
+            ("test_audio/Dtmf1.ogg", '1'),
+            ("test_audio/Dtmf2.ogg", '2'),
+            ("test_audio/Dtmf3.ogg", '3'),
+            ("test_audio/Dtmf4.ogg", '4'),
+            ("test_audio/Dtmf5.ogg", '5'),
+            ("test_audio/Dtmf6.ogg", '6'),
+            ("test_audio/Dtmf7.ogg", '7'),
+            ("test_audio/Dtmf8.ogg", '8'),
+            ("test_audio/Dtmf9.ogg", '9'),
+            ("test_audio/DtmfA.ogg", 'A'),
+            ("test_audio/DtmfB.ogg", 'B'),
+            ("test_audio/DtmfC.ogg", 'C'),
+            ("test_audio/DtmfD.ogg", 'D'),
+            ("test_audio/DtmfPound.ogg", '#'),
+            ("test_audio/DtmfStar.ogg", '*'),
         ];
 
         for case in test_cases {
-            dtmf_single_tone_process(case.0, &case.1);
+            dtmf_single_tone_process(case.0, case.1);
         }
     }
 
-    fn dtmf_single_tone_process(filename: &str, expected_frequencies: &[u32]) {
+    fn dtmf_single_tone_process(filename: &str, expected_digit: char) {
         let file = BufReader::new(File::open(filename).unwrap());
         let source = Decoder::new(file).unwrap();
         let sample_rate = source.sample_rate();
 
         let samples: Vec<f32> = source.convert_samples().collect();
-        let minimum_n = sample_rate / 70;
 
-        let mut results: Vec<(u32, f32)> = Vec::new();
-        println!("File: {}", filename);
-        for freq in DTMF_FREQUENCIES {
-            let output = goertzel(freq as f32, sample_rate, &samples[0..minimum_n as usize]);
-            println!("{} Hz - {:.0}", freq, output);
+        let digit = detect_dtmf_digit(&samples[0..480], sample_rate).unwrap();
 
-            results.push((freq, output));
+        assert_eq!(digit, expected_digit,
+            "File {}: Expected {} but found {}!", filename, expected_digit, digit);
+    }
+
+    #[test]
+    fn dtmf_multiple_digits_test() {
+        let file = BufReader::new(File::open("test_audio/DTMF_dialing.ogg").unwrap());
+        let source = Decoder::new(file).unwrap();
+        let sample_rate = source.sample_rate();
+        let channels = source.channels();
+        let samples: Vec<f32> = source.convert_samples().collect();
+
+        let mut processor = DtmfProcessor::new(sample_rate, channels);
+
+        println!("{:?}", processor);
+        let mut digits = String::new();
+
+        // Chunks of 10ms
+        for block in samples.chunks(sample_rate as usize / 100) { 
+            if let Some(digit) = processor.process_samples(block) {
+                digits.push(digit);
+            }
         }
-        let outputs: Vec<f32> = results.iter().map(|(_,output)| *output).collect();
-        let mean = outputs.iter().sum::<f32>() / outputs.len() as f32;
-        let std_dev: f32 = standard_deviation(&outputs).unwrap();
 
-        let frequency_components: Vec<u32> = results.iter()
-            .filter(|(_, output)| *output >= mean + std_dev && *output >= MIN_THRESHOLD )
-            .map(|(freq, _)| *freq)
-            .collect();
-        println!("{:?} - {} - {}", frequency_components, mean, std_dev);
-
-        assert_eq!(
-            frequency_components[0] * frequency_components[1], 
-            expected_frequencies[0] * expected_frequencies[1],
-            "File {}: Expected frequencies {:?} but found {:?}!", filename, expected_frequencies, frequency_components);
+        assert_eq!(digits, "06966753564646415180233673141636083381604400826146625368963884821381785073643399");
     }
 }

@@ -8,8 +8,8 @@ pub mod lib;
 
 
 
-fn process_input_stream(data: &[f32], info: &cpal::InputCallbackInfo, processor: &mut DtmfProcessor) {
-    match processor.process_samples(data, info) {
+fn process_input_stream(data: &[f32], processor: &mut DtmfProcessor) {
+    match processor.process_samples(data) {
         Some(char) => {
             print!("{}", char);
             io::stdout().flush().unwrap();
@@ -19,6 +19,21 @@ fn process_input_stream(data: &[f32], info: &cpal::InputCallbackInfo, processor:
 }
 
 fn main() {
+    //let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
+      //f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
+
+    //let sample_rate: u32 = 1024; 
+    //let test_signal: Vec<f32> = (0..102)
+        //.map(|n| sine_hz(n, 1000.0, sample_rate as f32))
+        //.collect();
+    
+    //// Test magnitude of two frequencies
+    //for freq in (500..1500).step_by(10) {
+        //let power = dtmf::goertzel(freq as f32, sample_rate, &test_signal);
+        //println!("{} ,{}", freq, power);
+    //}
+
+
     let host = cpal::default_host();
     let devices = host.input_devices().expect("no input devices available!");
     println!("Select input device:");
@@ -38,11 +53,12 @@ fn main() {
 
     let stream = device.build_input_stream(
         &config, 
-        move |data, info| process_input_stream(data, info, &mut processor),
+        move |data, _| process_input_stream(data, &mut processor),
         |_| {}
     ).expect("cannot build stream!");
 
     stream.play().unwrap();
+
 
     loop { }
 }
