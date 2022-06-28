@@ -1,7 +1,7 @@
 use std::{io::{self, Write}};
 
 use cpal::{traits::{HostTrait, StreamTrait}};
-use dtmf::DtmfProcessor;
+use dtmf::{DtmfProcessor};
 use rodio::DeviceTrait;
 
 pub mod lib;
@@ -19,20 +19,24 @@ fn process_input_stream(data: &[f32], processor: &mut DtmfProcessor) {
 }
 
 fn main() {
-    //let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
-      //f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
+    // let sine_hz = |n: i32, freq: f32, samp_rate: f32| 
+      // f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
 
-    //let sample_rate: u32 = 1024; 
-    //let test_signal: Vec<f32> = (0..102)
-        //.map(|n| sine_hz(n, 1000.0, sample_rate as f32))
-        //.collect();
+    // let sample_rate: u32 = 48_000; 
+    // let test_signal: Vec<f32> = (0..480)
+        // .map(|n| sine_hz(n-16, 1000.0, sample_rate as f32))
+        // .collect();
     
-    //// Test magnitude of two frequencies
-    //for freq in (500..1500).step_by(10) {
-        //let power = dtmf::goertzel(freq as f32, sample_rate, &test_signal);
-        //println!("{} ,{}", freq, power);
-    //}
-
+    // // Test magnitude of two frequencies
+    // for freq in (500..1500).step_by(100) {
+        // let g_power = dtmf::goertzel(freq as f32, sample_rate, &test_signal);
+        // let analytic_sine: Vec<f32> = (0..440).map(|n| sine_hz(n, freq as f32, sample_rate as f32)).collect();
+        // //let analytic_cosine: Vec<f32> = (0..124).map(|n| cosine_hz(n, freq1 as f32, sample_rate as f32) + cosine_hz(n, freq2 as f32, sample_rate as f32)).collect();
+        // let c_sine = dtmf::cross_correlate(&test_signal, &analytic_sine);//.into_iter().reduce(f32::max).unwrap();
+        // let c_h = dtmf::hilbert(&c_sine, sample_rate).into_iter().reduce(f32::max).unwrap();
+        // //let c_cosine: f32 = dtmf::cross_correlate(&test_signal, &analytic_cosine).into_iter().reduce(f32::max).unwrap().abs();
+        // println!("{} Hz, {:.3}, {:.3?}", freq, g_power, c_h);
+    // }
 
     let host = cpal::default_host();
     let devices = host.input_devices().expect("no input devices available!");
@@ -49,7 +53,7 @@ fn main() {
     let device = host.input_devices().unwrap().nth(device_index as usize).expect("cannot use this device!");
     let config = device.default_input_config().unwrap().config();
 
-    let mut processor = dtmf::DtmfProcessor::new(config.sample_rate.0, config.channels); 
+    let mut processor = dtmf::DtmfProcessor::new(config.sample_rate.0, config.channels, dtmf::Mode::Goertzel); 
 
     let stream = device.build_input_stream(
         &config, 

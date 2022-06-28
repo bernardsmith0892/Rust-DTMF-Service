@@ -3,13 +3,21 @@ use std::{f32::consts::PI};
 const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
 const MIN_THRESHOLD: f32 = 2.0;
 
-/// Object to track timings of a stream to process a multi-digit DTMF signal
+#[derive(Debug, Clone, Copy)]
+pub enum Mode {
+    Goertzel,
+    Correlation,
+}
+
+/// Object to track timings of an input stream process a multi-digit DTMF signal
 #[derive(Debug)]
 pub struct DtmfProcessor {
     /// Sample rate of input signal in *samples per second*.
     pub sample_rate: u32,
     /// Number of input channels, assumed to be interleaved.
     pub channels: u16,
+    /// The decoding mode to use. Either *Goertzel* or *Correlation*.
+    pub mode: Mode,
     /// The digit we are currently tracking. None if no digit detected.
     candidate: Option<char>,
     /// If we've already returned the candidate digit.
@@ -24,10 +32,11 @@ impl DtmfProcessor {
     /// Threshold length of silence in *nanoseconds* to mark a space.
     const SPACE_LENGTH: u128 = 500 * 1_000_000; 
 
-    pub fn new(sample_rate: u32, channels: u16) -> Self {
+    pub fn new(sample_rate: u32, channels: u16, mode: Mode) -> Self {
         Self { 
             sample_rate: sample_rate,
             channels: channels, 
+            mode: mode,
             candidate: None,
             candidate_pushed: true,
             current_timestamp: 0,
@@ -45,7 +54,7 @@ impl DtmfProcessor {
         self.current_timestamp += input_buffer.len() as u128 * nanoseconds_per_sample;
 
         // Analyze the input to detect a DTMF signal
-        match detect_dtmf_digit(&input_buffer, self.sample_rate) {
+        match detect_dtmf_digit(&input_buffer, self.sample_rate, self.mode) {
             // If we detected a DTMF digit...
             Some(digit) => {
                 // Return this digit if:
@@ -109,7 +118,7 @@ impl DtmfProcessor {
 /// # Example
 /// 
 /// ```
-/// # use dtmf;
+/// # use dtmf::*;
 /// // Creates a digitized sine wave of a given frequency and sample rate
 /// let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
 ///   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
@@ -120,8 +129,8 @@ impl DtmfProcessor {
 ///     .collect();
 /// 
 /// // Test signal strength at two frequencies (1,000 Hz and 900 Hz)
-/// let in_band = dtmf::goertzel(1000.0, 1024, &test_signal);
-/// let out_of_band = dtmf::goertzel(900.0, 1024, &test_signal);
+/// let in_band = goertzel(1000.0, 1024, &test_signal);
+/// let out_of_band = goertzel(900.0, 1024, &test_signal);
 /// 
 /// // The in-band frequency is much larger than the out-of-band one
 /// println!("{} > {}", in_band, out_of_band); // 255.99956 > 0.00097311544
@@ -134,9 +143,7 @@ pub fn goertzel(target_freq: f32, sample_rate: u32, samples: &[f32]) -> f32 {
     // First Stage - Compute the IIR
     let mut q = (0.0, 0.0, 0.0);
     for (n, &sample) in samples.iter().enumerate() {
-        // Hamming Window
-        let adjusted_sample = sample * (0.5 - 0.25 * f32::cos(2.0 * PI * (n as f32 / samples.len() as f32)));
-        q.0 = adjusted_sample + coefficient * q.1 - q.2;
+        q.0 = sample + coefficient * q.1 - q.2;
         q.2 = q.1;
         q.1 = q.0;
     }
@@ -146,6 +153,26 @@ pub fn goertzel(target_freq: f32, sample_rate: u32, samples: &[f32]) -> f32 {
     let imaginary = q.2 * f32::sin(omega);
 
     ( real.powf(2.0) + imaginary.powf(2.0) ).sqrt()
+}
+
+pub fn cross_correlate(x: &[f32], t: &[f32]) -> Vec<f32> {
+    let mut y: Vec<f32> = vec![0.0; x.len() - t.len() + 1];
+    for (i,y_val) in y.iter_mut().enumerate() {
+        for (j, t_val) in t.iter().enumerate() {
+            *y_val += x[i + j] * t_val;
+        }
+    }
+
+    y
+}
+
+// Seems like a bad implementation
+pub fn hilbert(signal: &[f32], sample_rate: u32) -> Vec<f32> {
+    let inverse_pi: Vec<f32> = (0..signal.len()).rev()
+        .map(|t| (1.0 / std::f32::consts::PI) * (t as f32 / sample_rate as f32))
+        .collect();
+
+    cross_correlate(signal, &inverse_pi)
 }
 
 fn standard_deviation(data: &[f32]) -> Option<f32> {
@@ -168,11 +195,12 @@ fn standard_deviation(data: &[f32]) -> Option<f32> {
 /// 
 /// * `samples: &[f32]` - The signal to analyze.
 /// * `sample_rate: u32` - The sample rate of the signal in *samples per second*.
+/// * `mode: Mode` - The decoding method to use. Either *Goertzel* or *Correlation*.
 /// 
 /// # Example
 /// 
 /// ```
-/// # use dtmf;
+/// # use dtmf::*;
 /// // Creates a digitized sine wave of a given frequency and sample rate
 /// let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
 ///   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
@@ -182,16 +210,26 @@ fn standard_deviation(data: &[f32]) -> Option<f32> {
 ///     .map(|n| sine_hz(n, 697.0, 1024.0) + sine_hz(n, 1633.0, 1024.0))
 ///     .collect();
 /// 
-/// let components = dtmf::get_dtmf_components(&test_signal, 1024);
+/// let components = get_dtmf_components(&test_signal, 1024, Mode::Goertzel);
 /// println!("{:?}", components); // [697, 1633]
 /// assert_eq!((components[0], components[1]), (697, 1633));
 /// ```
-pub fn get_dtmf_components(samples: &[f32], sample_rate: u32) -> Vec<u32> {
+pub fn get_dtmf_components(samples: &[f32], sample_rate: u32, mode: Mode) -> Vec<u32> {
     // Compute the power at each DTMF frequency
-    let results: Vec<f32> = 
-        DTMF_FREQUENCIES.iter()
-        .map(|freq| goertzel(*freq as f32, sample_rate, samples))
-        .collect();
+    let results: Vec<f32> = match mode {
+        Mode::Goertzel => DTMF_FREQUENCIES.iter()
+            .map(|freq| goertzel(*freq as f32, sample_rate, samples))
+            .collect(),
+        Mode::Correlation => DTMF_FREQUENCIES.iter()
+            .map(|freq| {
+                // Generate sine wave for this DTMF frequency
+                let analytic_sine: Vec<f32> = (0..samples.len() - (sample_rate as f32 / *freq as f32) as usize)
+                    .map(|n| f32::sin(*freq as f32 * 2.0 * std::f32::consts::PI * (n as f32) / sample_rate as f32))
+                    .collect();
+                cross_correlate(samples, &analytic_sine).into_iter().reduce(f32::max).unwrap()
+            })
+            .collect()
+    };
 
     // Determine the average power and standard deviation
     let mean = results.iter().sum::<f32>() / results.len() as f32;
@@ -212,11 +250,12 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32) -> Vec<u32> {
 /// 
 /// * `samples: &[f32]` - The signal to analyze.
 /// * `sample_rate: u32` - The sample rate of the signal in *samples per second*.
+/// * `mode: Mode` - The decoding method to use. Either *Goertzel* or *Correlation*.
 /// 
 /// # Example
 /// 
 /// ```
-/// # use dtmf;
+/// # use dtmf::*;
 /// // Creates a digitized sine wave of a given frequency and sample rate
 /// let sine_hz = |n: u32, freq: f32, samp_rate: f32| 
 ///   f32::sin(freq * 2.0 * std::f32::consts::PI * (n as f32) / samp_rate);
@@ -231,16 +270,16 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32) -> Vec<u32> {
 ///     .map(|n| sine_hz(n, 1000.0, 1024.0) + sine_hz(n, 600.0, 1024.0))
 ///     .collect();
 /// 
-/// let digit = dtmf::detect_dtmf_digit(&a_signal, 1024);
+/// let digit = detect_dtmf_digit(&a_signal, 1024, Mode::Correlation);
 /// println!("{:?}", digit); // Some("A")
 /// assert_eq!(digit, Some('A'));
 ///
-/// let digit = dtmf::detect_dtmf_digit(&bad_signal, 1024);
+/// let digit = detect_dtmf_digit(&bad_signal, 1024, Mode::Correlation);
 /// println!("{:?}", digit); // None
 /// assert_eq!(digit, None);
 /// ```
-pub fn detect_dtmf_digit(samples: &[f32], sample_rate: u32) -> Option<char> {
-    let freqs = get_dtmf_components(samples, sample_rate);
+pub fn detect_dtmf_digit(samples: &[f32], sample_rate: u32, mode: Mode) -> Option<char> {
+    let freqs = get_dtmf_components(samples, sample_rate, mode);
     
     if freqs.len() == 2 {
         match (freqs[0], freqs[1]) {
@@ -272,6 +311,7 @@ pub fn detect_dtmf_digit(samples: &[f32], sample_rate: u32) -> Option<char> {
 mod tests {
     use std::fs::File;
     use std::io::BufReader;
+    use rand;
     use rodio::{Decoder, Source};
 
     use super::*;
@@ -298,18 +338,19 @@ mod tests {
         ];
 
         for case in test_cases {
-            dtmf_single_tone_process(case.0, case.1);
+            dtmf_single_tone_process(case.0, case.1, Mode::Goertzel);
+            dtmf_single_tone_process(case.0, case.1, Mode::Correlation);
         }
     }
 
-    fn dtmf_single_tone_process(filename: &str, expected_digit: char) {
+    fn dtmf_single_tone_process(filename: &str, expected_digit: char, mode: Mode) {
         let file = BufReader::new(File::open(filename).unwrap());
         let source = Decoder::new(file).unwrap();
         let sample_rate = source.sample_rate();
 
         let samples: Vec<f32> = source.convert_samples().collect();
 
-        let digit = detect_dtmf_digit(&samples[0..480], sample_rate).unwrap();
+        let digit = detect_dtmf_digit(&samples[0..480], sample_rate, mode).unwrap();
 
         assert_eq!(digit, expected_digit,
             "File {}: Expected {} but found {}!", filename, expected_digit, digit);
@@ -323,18 +364,71 @@ mod tests {
         let channels = source.channels();
         let samples: Vec<f32> = source.convert_samples().collect();
 
-        let mut processor = DtmfProcessor::new(sample_rate, channels);
+        let mut goertzel_processor = DtmfProcessor::new(sample_rate, channels, Mode::Goertzel);
+        let mut correlation_processor = DtmfProcessor::new(sample_rate, channels, Mode::Correlation);
 
-        println!("{:?}", processor);
-        let mut digits = String::new();
+        let mut goertzel_digits = String::new();
+        let mut correlation_digits = String::new();
 
         // Chunks of 10ms
         for block in samples.chunks(sample_rate as usize / 100) { 
-            if let Some(digit) = processor.process_samples(block) {
-                digits.push(digit);
+            if let Some(digit) = goertzel_processor.process_samples(block) {
+                goertzel_digits.push(digit);
+            }
+
+            if let Some(digit) = correlation_processor.process_samples(block) {
+                correlation_digits.push(digit);
             }
         }
 
-        assert_eq!(digits, "06966753564646415180233673141636083381604400826146625368963884821381785073643399");
+        assert_eq!(goertzel_digits,    "06966753564646415180233673141636083381604400826146625368963884821381785073643399");
+        assert_eq!(correlation_digits, "06966753564646415180233673141636083381604400826146625368963884821381785073643399");
+    }
+
+    #[test]
+    fn dtmf_multiple_digits_test_noisy() {
+        let file = BufReader::new(File::open("test_audio/DTMF_dialing.ogg").unwrap());
+        let source = Decoder::new(file).unwrap();
+        let sample_rate = source.sample_rate();
+        let channels = source.channels();
+        let samples: Vec<f32> = source.convert_samples().collect();
+
+        let mut goertzel_passes = 0;
+        let mut correlation_passes = 0;
+        let trials = 100;
+        for trial in 0..trials {
+            println!("Trial {}...", trial);
+            let mut goertzel_processor = DtmfProcessor::new(sample_rate, channels, Mode::Goertzel);
+            let mut correlation_processor = DtmfProcessor::new(sample_rate, channels, Mode::Correlation);
+
+            let mut goertzel_digits = String::new();
+            let mut correlation_digits = String::new();
+
+            // Chunks of 10ms
+            for block in samples.chunks(sample_rate as usize / 100) { 
+                let noisy_block: Vec<f32> = block.iter().map(|n| n + 0.75 * rand::random::<f32>()).collect();
+                if let Some(digit) = goertzel_processor.process_samples(&noisy_block) {
+                    goertzel_digits.push(digit);
+                }
+
+                if let Some(digit) = correlation_processor.process_samples(&noisy_block) {
+                    correlation_digits.push(digit);
+                }
+            }
+
+            if goertzel_digits == "06966753564646415180233673141636083381604400826146625368963884821381785073643399" {
+                goertzel_passes += 1;
+            }
+
+            if correlation_digits == "06966753564646415180233673141636083381604400826146625368963884821381785073643399" {
+                correlation_passes += 1;
+            }
+        }
+
+        println!("Goertzel: {} of {}", goertzel_passes, trials);
+        println!("Correlation: {} of {}", correlation_passes, trials);
+
+        assert!(goertzel_passes >= (trials as f32 * 0.90) as u32, "Goertzel has less than 90% success rate...");
+        assert!(correlation_passes >= (trials as f32 * 0.90) as u32, "Correlation has less than 90% success rate...");
     }
 }
