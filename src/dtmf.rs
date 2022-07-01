@@ -27,10 +27,10 @@ pub struct DtmfProcessor {
 }
 
 impl DtmfProcessor {
-    /// Threshold length of a valid DTMF tone in *nanoseconds*.
+    /// Threshold length of a valid DTMF tone in *nanoseconds*. (milli to nano is 1,000,000)
     const TONE_LENGTH: u128 = 20 * 1_000_000; 
     /// Threshold length of silence in *nanoseconds* to mark a space.
-    const SPACE_LENGTH: u128 = 500 * 1_000_000; 
+    const SPACE_LENGTH: u128 = 2000 * 1_000_000; 
 
     pub fn new(sample_rate: u32, channels: u16, mode: Mode) -> Self {
         Self { 
@@ -142,7 +142,7 @@ pub fn goertzel(target_freq: f32, sample_rate: u32, samples: &[f32]) -> f32 {
     
     // First Stage - Compute the IIR
     let mut q = (0.0, 0.0, 0.0);
-    for (n, &sample) in samples.iter().enumerate() {
+    for &sample in samples.iter() {
         q.0 = sample + coefficient * q.1 - q.2;
         q.2 = q.1;
         q.1 = q.0;
@@ -235,13 +235,24 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32, mode: Mode) -> Vec
     let mean = results.iter().sum::<f32>() / results.len() as f32;
     let std_dev: f32 = standard_deviation(&results).unwrap();
 
-    // Return all frequencies which are stronger than the minimum threshold and are
+    // Return highest two frequencies which are stronger than the minimum threshold and are
     //  at least one standard deviation stronger than the average power level.
-    results.into_iter()
+    let mut sorted_vec: Vec<(f32, u32)> = results.into_iter()
         .zip(DTMF_FREQUENCIES)
         .filter(|(output, _)| *output >= mean + std_dev && *output >= MIN_THRESHOLD)
-        .map(|(_, freq)| freq)
-        .collect()
+        .collect();
+    sorted_vec.sort_by(|a, b| (*b).0.partial_cmp(&a.0).unwrap());
+
+    let mut output_vec: Vec<u32> = Vec::new();
+
+    for i in 0..2 {
+        if let Some((_, freq)) = sorted_vec.get(i) {
+            output_vec.push(*freq);
+        }
+    }
+
+    output_vec.sort();
+    output_vec
 }
 
 /// Attempts to decode a DTMF signal and return its corresponding digit. Returns `None` if it cannot detect a DTMF signal.
@@ -309,10 +320,10 @@ pub fn detect_dtmf_digit(samples: &[f32], sample_rate: u32, mode: Mode) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
+    use std::{fs::File};
     use std::io::BufReader;
-    use rand;
     use rodio::{Decoder, Source};
+    use rand;
 
     use super::*;
 
@@ -395,7 +406,7 @@ mod tests {
 
         let mut goertzel_passes = 0;
         let mut correlation_passes = 0;
-        let trials = 100;
+        let trials = 10;
         for trial in 0..trials {
             println!("Trial {}...", trial);
             let mut goertzel_processor = DtmfProcessor::new(sample_rate, channels, Mode::Goertzel);
@@ -406,7 +417,8 @@ mod tests {
 
             // Chunks of 10ms
             for block in samples.chunks(sample_rate as usize / 100) { 
-                let noisy_block: Vec<f32> = block.iter().map(|n| n + 0.75 * rand::random::<f32>()).collect();
+                let noise_strength: f32 = 0.50;
+                let noisy_block: Vec<f32> = block.iter().map(|n| n + noise_strength * rand::random::<f32>()).collect();
                 if let Some(digit) = goertzel_processor.process_samples(&noisy_block) {
                     goertzel_digits.push(digit);
                 }
@@ -425,8 +437,8 @@ mod tests {
             }
         }
 
-        println!("Goertzel: {} of {}", goertzel_passes, trials);
-        println!("Correlation: {} of {}", correlation_passes, trials);
+        println!("Goertzel: {} of {} ({:.2}%)", goertzel_passes, trials, 100.0 * goertzel_passes as f32 / trials as f32);
+        println!("Correlation: {} of {} ({:.2}%)", correlation_passes, trials, 100.0 * correlation_passes as f32 / trials as f32);
 
         assert!(goertzel_passes >= (trials as f32 * 0.90) as u32, "Goertzel has less than 90% success rate...");
         assert!(correlation_passes >= (trials as f32 * 0.90) as u32, "Correlation has less than 90% success rate...");

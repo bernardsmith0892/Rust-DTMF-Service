@@ -1,20 +1,55 @@
-use std::{io::{self, Write}};
-
+use std::{io::{self, Write}, sync::Mutex};
 use cpal::{traits::{HostTrait, StreamTrait}};
-use dtmf::{DtmfProcessor};
 use rodio::DeviceTrait;
 
-pub mod lib;
+use crate::controller::DtmfCommand;
 
+pub mod dtmf;
+pub mod controller;
 
+fn process_input_stream(data: &[f32], processor: &mut dtmf::DtmfProcessor, commands: &Vec<DtmfCommand>, current_input: &Mutex<String>) {
+    let mut input = current_input.lock().unwrap();
 
-fn process_input_stream(data: &[f32], processor: &mut DtmfProcessor) {
     match processor.process_samples(data) {
+        // Attempt to current input to a command if a '#' was provided
+        Some('#') => {
+            print!("{}", "#\n");
+            io::stdout().flush().unwrap();
+
+            for cmd in commands {
+                if cmd.validate_passcode(&input) {
+                    match cmd.run() {
+                        Ok(output) => {
+                            match std::str::from_utf8(&output.stdout) {
+                                Ok(utf8_output) => println!("Output: {}", utf8_output),
+                                Err(error) => println!("Issue decoding command output to UTF-8! ({:?})", error),
+                            };
+                        },
+                        Err(error) => println!("Error running command {:?} - {:?}", cmd, error),
+                    };
+                }
+            }
+
+            input.clear();
+        },
+        // Clear input string if we decode a space character
+        Some(' ') => {
+            // Add a newline if we're currently decoding a command
+            if !input.is_empty() {
+                print!("{}", "\n");
+                io::stdout().flush().unwrap();
+            }
+
+            input.clear();
+        },
+        // Add all other characters to the current input string
         Some(char) => {
             print!("{}", char);
             io::stdout().flush().unwrap();
+
+            input.push(char);
         },
-        None => {},
+        None => (),
     }
 }
 
@@ -38,6 +73,9 @@ fn main() {
         // println!("{} Hz, {:.3}, {:.3?}", freq, g_power, c_h);
     // }
 
+    let commands = DtmfCommand::from_file("dtmf_config.txt");
+    let current_input: Mutex<String> = Mutex::new(String::new());
+
     let host = cpal::default_host();
     let devices = host.input_devices().expect("no input devices available!");
     println!("Select input device:");
@@ -57,7 +95,7 @@ fn main() {
 
     let stream = device.build_input_stream(
         &config, 
-        move |data, _| process_input_stream(data, &mut processor),
+        move |data, _| process_input_stream(data, &mut processor, &commands, &current_input),
         |_| {}
     ).expect("cannot build stream!");
 
