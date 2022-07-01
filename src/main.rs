@@ -1,6 +1,7 @@
 use std::{io::{self, Write}, sync::Mutex};
 use cpal::{traits::{HostTrait, StreamTrait}};
 use rodio::DeviceTrait;
+use chrono;
 
 use crate::controller::DtmfCommand;
 
@@ -21,7 +22,7 @@ fn process_input_stream(data: &[f32], processor: &mut dtmf::DtmfProcessor, comma
                     match cmd.run() {
                         Ok(output) => {
                             match std::str::from_utf8(&output.stdout) {
-                                Ok(utf8_output) => println!("Output: {}", utf8_output),
+                                Ok(utf8_output) => println!("Output: {}", utf8_output.trim()),
                                 Err(error) => println!("Issue decoding command output to UTF-8! ({:?})", error),
                             };
                         },
@@ -44,6 +45,11 @@ fn process_input_stream(data: &[f32], processor: &mut dtmf::DtmfProcessor, comma
         },
         // Add all other characters to the current input string
         Some(char) => {
+            if input.is_empty() {
+                let curr_time = chrono::Local::now();
+                print!("{} - ", curr_time.format("%d-%b-%Y %H:%M:%S%.3f"))
+            }
+
             print!("{}", char);
             io::stdout().flush().unwrap();
 
