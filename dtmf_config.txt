@@ -1,2 +1,2 @@
-1234, cmd.exe /c echo "hello world!"
-1235, cmd.exe /c echo "hello globe!"
+1234, cmd.exe /c echo "Transmission Received!"
+#1235, powershell -c (New-Object Media.SoundPlayer "bad-to-the-bone.wav").PlaySync()

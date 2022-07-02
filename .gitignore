@@ -2,3 +2,5 @@
 /Cargo.lock
 /test_audio
 *dtmf.xlsx
+*.mp3
+*.wav

@@ -55,9 +55,15 @@ impl DtmfCommand {
         let mut commands = Vec::<Self>::new();
         for (line_num, line) in file.lines().enumerate() {
             if let Ok(command_line) = line {
-                match Self::new(&command_line) {
-                    Some(new_command) => commands.push(new_command),
-                    None => println!("Error decoding configuration on line {} - {:?}", line_num + 1, command_line),
+                // Comment lines start with `#`
+                if command_line.starts_with('#') {
+                    // println!("Ignoring configuration on line {} - {:?}", line_num + 1, command_line),
+                }
+                else {
+                    match Self::new(&command_line) {
+                        Some(new_command) => commands.push(new_command),
+                        None => println!("Error decoding configuration on line {} - {:?}", line_num + 1, command_line),
+                    }
                 }
             }
         }
