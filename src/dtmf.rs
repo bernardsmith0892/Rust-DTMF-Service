@@ -1,12 +1,27 @@
-use std::{f32::consts::PI};
+use std::{f32::consts::PI, collections::VecDeque};
 
 const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
 const MIN_THRESHOLD: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy)]
+enum ProcessorState {
+    NewCandidate,
+    ProcessedCandidate,
+    Mulligan,
+    NoCandidate,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum Mode {
     Goertzel,
     Correlation,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Digit {
+    digit: Option<char>,
+    samples: usize,
+    processed: bool,
 }
 
 /// Object to track timings of an input stream process a multi-digit DTMF signal
@@ -18,28 +33,42 @@ pub struct DtmfProcessor {
     pub channels: u16,
     /// The decoding mode to use. Either *Goertzel* or *Correlation*.
     pub mode: Mode,
-    /// The digit we are currently tracking. None if no digit detected.
-    candidate: Option<char>,
-    /// If we've already returned the candidate digit.
-    candidate_pushed: bool,
-    /// How long we've been tracking this candidate in *nanoseconds*.
-    current_timestamp: u128,
+    candidate: Digit,
+    mulligan: Digit,
+    mulligan_samples_this_digit: usize,
+    last_return: char,
+    samples_with_no_return: usize,
+    state: ProcessorState,
+    samples_per_tone: usize,
+    samples_allowed_per_drop: usize,
+    samples_per_space: usize,
+
 }
 
 impl DtmfProcessor {
-    /// Threshold length of a valid DTMF tone in *nanoseconds*. (milli to nano is 1,000,000)
-    const TONE_LENGTH: u128 = 20 * 1_000_000; 
-    /// Threshold length of silence in *nanoseconds* to mark a space.
-    const SPACE_LENGTH: u128 = 2000 * 1_000_000; 
+    /// Threshold length of a valid DTMF tone in *milliseconds*
+    const TONE_LENGTH: usize = 60; 
+    /// Maximum time that a DTMF tone can drop in *milliseconds* and still be considered valid
+    const ALLOWED_DROP_LENGTH: usize = 31; 
+    /// Threshold length of silence in *milliseconds* to mark a space.
+    const SPACE_LENGTH: usize = 2000; 
 
     pub fn new(sample_rate: u32, channels: u16, mode: Mode) -> Self {
+        let samples_per_millisecond: usize = sample_rate as usize / 1_000;
+
         Self { 
             sample_rate: sample_rate,
             channels: channels, 
             mode: mode,
-            candidate: None,
-            candidate_pushed: true,
-            current_timestamp: 0,
+            candidate: Digit { digit: None, samples: 0, processed: true},
+            mulligan: Digit { digit: None, samples: 0, processed: true},
+            mulligan_samples_this_digit: 0,
+            last_return: ' ',
+            samples_with_no_return: 0,
+            state: ProcessorState::ProcessedCandidate,
+            samples_per_tone: DtmfProcessor::TONE_LENGTH * samples_per_millisecond,
+            samples_allowed_per_drop: DtmfProcessor::ALLOWED_DROP_LENGTH * samples_per_millisecond,
+            samples_per_space: DtmfProcessor::SPACE_LENGTH * samples_per_millisecond,
         }
     }
 
@@ -49,57 +78,121 @@ impl DtmfProcessor {
             .map(|c| c.iter().sum::<f32>() / c.len() as f32 )
             .collect();
 
-        // Increment the current timestamp by the data length
-        let nanoseconds_per_sample: u128 = 1_000_000_000 / self.sample_rate as u128;
-        self.current_timestamp += input_buffer.len() as u128 * nanoseconds_per_sample;
+        let current_digit = detect_dtmf_digit(&input_buffer, self.sample_rate, self.mode);
+        self.samples_with_no_return += input_buffer.len();
 
-        // Analyze the input to detect a DTMF signal
-        match detect_dtmf_digit(&input_buffer, self.sample_rate, self.mode) {
-            // If we detected a DTMF digit...
-            Some(digit) => {
-                // Return this digit if:
-                //  - It matches the known candidate
-                //  - It's been on longer than the minimum tone spacing
-                //  - And it's not already pushed to the output buffer
-                if Some(digit) == self.candidate {
-                    if self.current_timestamp >= DtmfProcessor::TONE_LENGTH
-                    && !self.candidate_pushed
-                    {
-                        // Mark this character as pushed
-                        self.candidate_pushed = true;
+        match self.state {
+            ProcessorState::NoCandidate => {
+                match current_digit {
+                    Some(_) => {
+                        self.candidate = Digit {
+                            digit: current_digit,
+                            samples: input_buffer.len(),
+                            processed: false,
+                        };
+                        self.state = ProcessorState::NewCandidate;
+                    },
+                    None => {
+                        self.candidate.samples += input_buffer.len();
 
-                        // Print the current char
-                        return Some(digit);
-                    }
-                }
-                // If it's a new digit, reset the candidate values
-                else {
-                    self.candidate = Some(digit);
-                    self.current_timestamp = 0;
-                    self.candidate_pushed = false;
+                        // Return space
+                        if self.candidate.samples >= self.samples_per_space && !self.candidate.processed {
+                            self.candidate.processed = true;
+                            self.samples_with_no_return = 0;
+                            self.last_return = ' ';
+                            return Some(' ');
+                        }
+                    },
                 }
             },
-            // If we do not detect a DTMF signal...
-            None => {
-                // And we're currently tracking silence
-                if self.candidate.is_none() {
-                    // Mark a space if there has been enough silence after a previous digit
-                    if self.current_timestamp >= DtmfProcessor::SPACE_LENGTH 
-                    && !self.candidate_pushed {
-                        // Mark this space as pushed
-                        self.candidate_pushed = true;     
+            ProcessorState::NewCandidate => {
+                match current_digit {
+                    Some(_) if current_digit == self.candidate.digit => {
+                        self.candidate.samples += input_buffer.len();
 
-                        // Print a space
-                        return Some(' ');
-                    }
-                }
-                // Start tracking silence if he haven't already
-                else {
-                    self.candidate = None;
-                    self.candidate_pushed = false;
-                    self.current_timestamp = 0;
+                        // Return digit
+                        if self.candidate.samples >= self.samples_per_tone && !self.candidate.processed {
+                            self.state = ProcessorState::ProcessedCandidate;
+                            self.candidate.processed = true;
+                            self.samples_with_no_return = 0;
+                            self.last_return = current_digit.unwrap();
+                            return current_digit;
+                        }
+                    },
+                    _ => {
+                        self.state = ProcessorState::Mulligan;
+
+                        self.mulligan = self.candidate;
+                        self.mulligan_samples_this_digit = 0;
+                        self.candidate = Digit {
+                            digit: current_digit,
+                            samples: input_buffer.len(),
+                            processed: false,
+                        };
+                    },
                 }
             },
+            ProcessorState::ProcessedCandidate => {
+                match current_digit {
+                    Some(_) if current_digit == self.candidate.digit => {
+                        self.candidate.samples += input_buffer.len();
+                        self.samples_with_no_return = 0;
+                    },
+                    _ => {
+                        self.state = ProcessorState::Mulligan;
+
+                        self.mulligan = self.candidate;
+                        self.candidate = Digit {
+                            digit: current_digit,
+                            samples: input_buffer.len(),
+                            processed: false,
+                        };
+                    },
+                }
+            },
+            ProcessorState::Mulligan => {
+                match current_digit {
+                    // If we've returned to the right digit...
+                    Some(_) if current_digit == self.mulligan.digit => {
+                        self.mulligan.samples += self.candidate.samples + input_buffer.len();
+                        self.mulligan_samples_this_digit = self.mulligan.samples;
+                        self.samples_with_no_return = 0;
+
+                        self.candidate = self.mulligan;
+
+                        if self.candidate.processed {
+                            self.state = ProcessorState::ProcessedCandidate;
+                        }
+                        else {
+                            self.state = ProcessorState::NewCandidate;
+                        }
+                    },
+                    // If we are still receiving different digits or silence...
+                    _ => {
+                        // If we have a completely different digit during this drop phase
+                        if current_digit != self.candidate.digit {
+                            self.candidate.digit = current_digit;
+                            self.mulligan_samples_this_digit = input_buffer.len();
+                        }
+
+                        self.candidate.samples += input_buffer.len();
+                        self.samples_with_no_return += input_buffer.len();
+                        if self.candidate.samples > self.samples_allowed_per_drop {
+                            self.state = match self.candidate.digit {
+                                Some(_) => ProcessorState::NewCandidate,
+                                None => ProcessorState::NoCandidate,
+                            };
+                            self.candidate.samples = self.mulligan_samples_this_digit;
+                        }
+                    },
+                }
+            },
+        }
+
+        if self.samples_with_no_return >= self.samples_per_space && self.last_return != ' ' {
+            self.samples_with_no_return = 0;
+            self.last_return = ' ';
+            return Some(' ');
         }
 
         // No new DTMF character detected
@@ -235,6 +328,8 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32, mode: Mode) -> Vec
     let mean = results.iter().sum::<f32>() / results.len() as f32;
     let std_dev: f32 = standard_deviation(&results).unwrap();
 
+    //println!("Mean: {}, STDEV: {} - {:?}", mean, std_dev, results);
+
     // Return highest two frequencies which are stronger than the minimum threshold and are
     //  at least one standard deviation stronger than the average power level.
     let mut sorted_vec: Vec<(f32, u32)> = results.into_iter()
@@ -292,6 +387,7 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32, mode: Mode) -> Vec
 pub fn detect_dtmf_digit(samples: &[f32], sample_rate: u32, mode: Mode) -> Option<char> {
     let freqs = get_dtmf_components(samples, sample_rate, mode);
     
+    // println!("Freqs: {:?}", freqs);
     if freqs.len() == 2 {
         match (freqs[0], freqs[1]) {
             (697, 1209) => Some('1'),
