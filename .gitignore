@@ -4,3 +4,5 @@
 *dtmf.xlsx
 *.mp3
 *.wav
+.vscode/*
+.ipynb_checkpoints/*

@@ -1,0 +1,14 @@
+# Fields:
+#   description:
+#   passcode:
+#   command:
+#   totp_key:
+#   takes_param:
+---
+description: Text Alert
+passcode: "1234"
+command: cmd.exe /c echo "Transmission Received!"
+---
+description: Audio Alert
+passcode: "1235"
+command: powershell -c (New-Object Media.SoundPlayer "bad-to-the-bone.wav").PlaySync()

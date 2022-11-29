@@ -1,13 +1,13 @@
 use std::{f32::consts::PI, collections::VecDeque};
 
 const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
-const MIN_THRESHOLD: f32 = 2.0;
+const MIN_THRESHOLD: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy)]
 enum ProcessorState {
     NewCandidate,
     ProcessedCandidate,
-    Mulligan,
+    Debounce,
     NoCandidate,
 }
 
@@ -34,8 +34,8 @@ pub struct DtmfProcessor {
     /// The decoding mode to use. Either *Goertzel* or *Correlation*.
     pub mode: Mode,
     candidate: Digit,
-    mulligan: Digit,
-    mulligan_samples_this_digit: usize,
+    debounce_hold: Digit,
+    debounce_samples_this_digit: usize,
     last_return: char,
     samples_with_no_return: usize,
     state: ProcessorState,
@@ -61,8 +61,8 @@ impl DtmfProcessor {
             channels: channels, 
             mode: mode,
             candidate: Digit { digit: None, samples: 0, processed: true},
-            mulligan: Digit { digit: None, samples: 0, processed: true},
-            mulligan_samples_this_digit: 0,
+            debounce_hold: Digit { digit: None, samples: 0, processed: true},
+            debounce_samples_this_digit: 0,
             last_return: ' ',
             samples_with_no_return: 0,
             state: ProcessorState::ProcessedCandidate,
@@ -81,6 +81,7 @@ impl DtmfProcessor {
         let current_digit = detect_dtmf_digit(&input_buffer, self.sample_rate, self.mode);
         self.samples_with_no_return += input_buffer.len();
 
+        // println!("Detected Digit: {:?}", current_digit);
         match self.state {
             ProcessorState::NoCandidate => {
                 match current_digit {
@@ -120,10 +121,10 @@ impl DtmfProcessor {
                         }
                     },
                     _ => {
-                        self.state = ProcessorState::Mulligan;
+                        self.state = ProcessorState::Debounce;
 
-                        self.mulligan = self.candidate;
-                        self.mulligan_samples_this_digit = 0;
+                        self.debounce_hold = self.candidate;
+                        self.debounce_samples_this_digit = 0;
                         self.candidate = Digit {
                             digit: current_digit,
                             samples: input_buffer.len(),
@@ -139,9 +140,9 @@ impl DtmfProcessor {
                         self.samples_with_no_return = 0;
                     },
                     _ => {
-                        self.state = ProcessorState::Mulligan;
+                        self.state = ProcessorState::Debounce;
 
-                        self.mulligan = self.candidate;
+                        self.debounce_hold = self.candidate;
                         self.candidate = Digit {
                             digit: current_digit,
                             samples: input_buffer.len(),
@@ -150,15 +151,15 @@ impl DtmfProcessor {
                     },
                 }
             },
-            ProcessorState::Mulligan => {
+            ProcessorState::Debounce => {
                 match current_digit {
                     // If we've returned to the right digit...
-                    Some(_) if current_digit == self.mulligan.digit => {
-                        self.mulligan.samples += self.candidate.samples + input_buffer.len();
-                        self.mulligan_samples_this_digit = self.mulligan.samples;
+                    Some(_) if current_digit == self.debounce_hold.digit => {
+                        self.debounce_hold.samples += self.candidate.samples + input_buffer.len();
+                        self.debounce_samples_this_digit = self.debounce_hold.samples;
                         self.samples_with_no_return = 0;
 
-                        self.candidate = self.mulligan;
+                        self.candidate = self.debounce_hold;
 
                         if self.candidate.processed {
                             self.state = ProcessorState::ProcessedCandidate;
@@ -172,7 +173,7 @@ impl DtmfProcessor {
                         // If we have a completely different digit during this drop phase
                         if current_digit != self.candidate.digit {
                             self.candidate.digit = current_digit;
-                            self.mulligan_samples_this_digit = input_buffer.len();
+                            self.debounce_samples_this_digit = input_buffer.len();
                         }
 
                         self.candidate.samples += input_buffer.len();
@@ -182,7 +183,7 @@ impl DtmfProcessor {
                                 Some(_) => ProcessorState::NewCandidate,
                                 None => ProcessorState::NoCandidate,
                             };
-                            self.candidate.samples = self.mulligan_samples_this_digit;
+                            self.candidate.samples = self.debounce_samples_this_digit;
                         }
                     },
                 }
@@ -328,7 +329,7 @@ pub fn get_dtmf_components(samples: &[f32], sample_rate: u32, mode: Mode) -> Vec
     let mean = results.iter().sum::<f32>() / results.len() as f32;
     let std_dev: f32 = standard_deviation(&results).unwrap();
 
-    //println!("Mean: {}, STDEV: {} - {:?}", mean, std_dev, results);
+    // println!("Mean: {}, STDEV: {} - {:?}", mean, std_dev, results);
 
     // Return highest two frequencies which are stronger than the minimum threshold and are
     //  at least one standard deviation stronger than the average power level.
@@ -413,6 +414,7 @@ pub fn detect_dtmf_digit(samples: &[f32], sample_rate: u32, mode: Mode) -> Optio
         None
     }
 }
+
 
 #[cfg(test)]
 mod tests {

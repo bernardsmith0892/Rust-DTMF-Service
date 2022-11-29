@@ -79,7 +79,7 @@ fn main() {
         // println!("{} Hz, {:.3}, {:.3?}", freq, g_power, c_h);
     // }
 
-    let commands = DtmfCommand::from_file("dtmf_config.txt");
+    let commands = DtmfCommand::from_yaml_file("dtmf_config.yaml").unwrap();
     let current_input: Mutex<String> = Mutex::new(String::new());
 
     let host = cpal::default_host();
