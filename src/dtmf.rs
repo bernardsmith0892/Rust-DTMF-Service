@@ -24,7 +24,7 @@ struct Digit {
     processed: bool,
 }
 
-/// Object to track timings of an input stream process a multi-digit DTMF signal
+/// Object to track timings of an input stream to process a multi-digit DTMF signal
 #[derive(Debug)]
 pub struct DtmfProcessor {
     /// Sample rate of input signal in *samples per second*.
@@ -504,7 +504,7 @@ mod tests {
 
         let mut goertzel_passes = 0;
         let mut correlation_passes = 0;
-        let trials = 10;
+        let trials = 25;
         for trial in 0..trials {
             println!("Trial {}...", trial);
             let mut goertzel_processor = DtmfProcessor::new(sample_rate, channels, Mode::Goertzel);
