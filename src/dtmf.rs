@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, collections::VecDeque};
+use std::{f32::consts::PI};
 
 const DTMF_FREQUENCIES: [u32; 8] = [697, 770, 852, 941, 1209, 1336, 1477, 1633];
 const MIN_THRESHOLD: f32 = 10.0;
@@ -504,9 +504,10 @@ mod tests {
 
         let mut goertzel_passes = 0;
         let mut correlation_passes = 0;
-        let trials = 25;
+        let trials = 50;
+        println!("Trial\tGoertzel\tCorrelation");
         for trial in 0..trials {
-            println!("Trial {}...", trial);
+            print!("{}\t", trial);
             let mut goertzel_processor = DtmfProcessor::new(sample_rate, channels, Mode::Goertzel);
             let mut correlation_processor = DtmfProcessor::new(sample_rate, channels, Mode::Correlation);
 
@@ -528,10 +529,18 @@ mod tests {
 
             if goertzel_digits == "06966753564646415180233673141636083381604400826146625368963884821381785073643399" {
                 goertzel_passes += 1;
+                print!("✔\t\t");
+            }
+            else {
+                print!("✘\t\t");
             }
 
             if correlation_digits == "06966753564646415180233673141636083381604400826146625368963884821381785073643399" {
                 correlation_passes += 1;
+                println!("✔\t");
+            }
+            else {
+                println!("✘\t");
             }
         }
 

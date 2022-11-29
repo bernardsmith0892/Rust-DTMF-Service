@@ -86,8 +86,10 @@ fn main() {
     let devices = host.input_devices().expect("no input devices available!");
     println!("Select input device:");
     for (i, device) in devices.enumerate() {
-        println!("\t{} - {:?}", i, device.name().unwrap());
+        println!(" {} - {:?}", i, device.name().unwrap());
     }
+    print!("> ");
+    std::io::stdout().flush().unwrap();
 
     let mut input_string = String::new();
     std::io::stdin().read_line(&mut input_string).unwrap();
@@ -98,15 +100,14 @@ fn main() {
     let config = device.default_input_config().unwrap().config();
 
     let mut processor = dtmf::DtmfProcessor::new(config.sample_rate.0, config.channels, dtmf::Mode::Goertzel); 
-
     let stream = device.build_input_stream(
         &config, 
         move |data, _| process_input_stream(data, &mut processor, &commands, &current_input),
         |_| {}
     ).expect("cannot build stream!");
-
     stream.play().unwrap();
 
+    println!("Listening for DTMF commands...");
 
     loop { }
 }
