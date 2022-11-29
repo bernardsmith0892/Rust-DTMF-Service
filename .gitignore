@@ -1,8 +1,9 @@
 /target
 /Cargo.lock
 /test_audio
-*dtmf.xlsx
+/.vscode
+/.ipynb_checkpoints
+*.ipynb
+*.xlsx
 *.mp3
 *.wav
-.vscode/*
-.ipynb_checkpoints/*
